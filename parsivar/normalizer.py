@@ -1,10 +1,13 @@
 from re import sub
+import re
 import copy
 import os
 from .tokenizer import Tokenizer
 from .data_helper import DataHelper
 from .token_merger import ClassifierChunkParser
-
+from jdatetime import date
+import jdatetime
+from datetime import datetime
 
 class Normalizer():
 
@@ -29,7 +32,6 @@ class Normalizer():
         self.pinglish_conversion_needed = pinglish_conversion_needed
         self.data_helper = DataHelper()
         self.token_merger = ClassifierChunkParser()
-
 
         if self.date_normalizing_needed or self.pinglish_conversion_needed:
             self.tokenizer = Tokenizer()
@@ -214,7 +216,33 @@ class Normalizer():
         Sa2 = r'(\n)+'
         Sb2 = r'\n'
         Sc2 = sub(Sa2, Sb2, Sc1)
-        return Sc2
+        pattern = r"همین ساعت"
+        replacement = datetime.now().strftime("%H:%M")
+        Sc2 = re.sub(pattern, replacement, Sc2)
+        pattern = r"همین موقع"
+        replacement = datetime.now().strftime("%H:%M")
+        Sc2 = re.sub(pattern, replacement, Sc2)
+        # example: support “ساعت دوازده و بیست”:
+        pattern = r"ساعت (\w+) و (\w+)"
+        replacement = r"\1 : \2"
+        # remove spaces,  example: support “۱۲ : ۲۰”:
+        Sc2 = re.sub(pattern, replacement, Sc2)
+        pattern = r"(\d+) : (\d+)"
+        replacement = r"\1:\2"
+        Sc2 = re.sub(pattern, replacement, Sc2)
+        # example: support “۱۲ , ۲۰”:
+        Sc2 = re.sub(r"\d+ و \d+", lambda match: match.group().replace(" و ", ":"), Sc2)
+        Sc2 = re.sub(r"نیم ساعت", "30 دقیقه", Sc2)
+        Sc2 = re.sub(r"یک ربع", "15 دقیقه", Sc2)
+        # example: support “ساعت ۱۲”
+        reg1 = r'ساعت (\d+) '
+        replacement = r'\1:0 '
+        # example: support “ساعت ۱۲:۲۰”
+        res1 = sub(reg1, replacement, Sc2)
+        reg2 = r'ساعت (\d+):(\d+)'
+        replacement = r'\1:\2'
+        result = sub(reg2, replacement, res1)
+        return result
 
     def space_correction(self, doc_string):
         a00 = r'^(بی|می|نمی)( )'
@@ -295,7 +323,7 @@ class Normalizer():
 
     def normalize(self, doc_string, new_line_elimination=False):
         normalized_string = self.sub_alphabets(doc_string)
-        normalized_string = self.data_helper.clean_text(normalized_string, new_line_elimination).strip()
+        # normalized_string = self.data_helper.clean_text(normalized_string, new_line_elimination).strip()
 
         if self.statistical_space_correction:
             token_list = normalized_string.strip().split()
@@ -304,13 +332,16 @@ class Normalizer():
             normalized_string = " ".join(x for x in token_list)
             normalized_string = self.data_helper.clean_text(normalized_string, new_line_elimination)
         else:
-            normalized_string = self.space_correction(self.space_correction_plus1(self.space_correction_plus2(self.space_correction_plus3(normalized_string)))).strip()
+            normalized_string = self.space_correction(self.space_correction_plus1(
+                self.space_correction_plus2(self.space_correction_plus3(normalized_string)))).strip()
 
         if self.pinglish_conversion_needed:
-            normalized_string = self.pinglish_conversion.pingilish2persian(self.tokenizer.tokenize_words(normalized_string))
+            normalized_string = self.pinglish_conversion.pingilish2persian(
+                self.tokenizer.tokenize_words(normalized_string))
 
         if self.date_normalizing_needed:
-            normalized_string = self.date_normalizer.normalize_dates(self.date_normalizer.normalize_numbers(self.tokenizer.tokenize_words(normalized_string)).split())
+            normalized_string = self.date_normalizer.normalize_dates(
+                self.date_normalizer.normalize_numbers(self.tokenizer.tokenize_words(normalized_string)).split())
 
         return normalized_string
 
@@ -338,41 +369,99 @@ class DateNormalizer():
                          "هجدهم": 18, "نوزدهم": 19, "بیستم": 20, "چهلم": 40, "پنجاهم": 50,
                          "شصتم": 60, "هفتادم": 70, "نودم": 90, "سیصدم": 300, "چهارصدم": 400,
                          "پانصدم": 500, "ششصدم": 600, "هفتصدم": 700, "هشتصدم": 800, "نهصدم": 900,
-                         "هشتادم": 80}
+                         "هشتادم": 80, "ربع": 15, "نیم": 30}
+
+    def jalali_to_gregorian(self, jalali_date_string):
+        """""
+        convert jalali dates (shamsi calendar) to gregorian dates (miladi calendar)
+        """""
+        jalali_date = jdatetime.date(int(jalali_date_string[:4]), int(jalali_date_string[5:7]),
+                                     int(jalali_date_string[8:10]))
+        gregorian_date = jalali_date.togregorian()
+        return gregorian_date.strftime("%Y-%m-%d")
 
     def find_date_part(self, token_list):
+        """""
+        find the date part in sentence and standardize it.
+        example: input >> "دو شهریور ۹۹"
+        output >> "۱۳۹۹/۰۶/۰۲"
+        """""
         for index, element in enumerate(token_list):
             if element == "/":
-                if index-1 >= 0 and index+1 < len(token_list) \
-                        and token_list[index -1].isdigit() and token_list[index+1].isdigit():
-                    if index+3 < len(token_list) and token_list[index+2] == "/" \
+                if index - 1 >= 0 and index + 1 < len(token_list) \
+                        and token_list[index - 1].isdigit() and token_list[index + 1].isdigit():
+                    if index + 3 < len(token_list) and token_list[index + 2] == "/" \
                             and token_list[index + 3].isdigit():
-                        formal_date = [int(token_list[index-1]), int(token_list[index+1]), int(token_list[index+3])]
-                        formal_date = "y" + str(formal_date[2]) + "m" + str(formal_date[1]) + "d" + str(formal_date[0])
-                        return formal_date, index-1, index+3
+                        formal_date = [int(token_list[index - 1]), int(token_list[index + 1]),
+                                       int(token_list[index + 3])]
+                        # check if the date format is not yyyy/mm/dd , correct it
+                        if len(str(formal_date[0])) != 2:
+                            formal_date[0] = str(formal_date[0]).zfill(2)
+                        if len(str(formal_date[1])) != 2:
+                            formal_date[1] = str(formal_date[1]).zfill(2)
+                        if len(str(formal_date[2])) != 4:
+                            formal_date[2] = int(formal_date[2]) + 1300
+                        formal_date = str(formal_date[2]) + "/" + str(formal_date[1]) + "/" + str(formal_date[0])
+                        formal_date = self.jalali_to_gregorian(formal_date)
+                        return formal_date, index - 1, index + 3
                     else:
-                        formal_date = [int(token_list[index-1]), int(token_list[index+ 1]), 0]
-                        formal_date = "y" + str(formal_date[2]) + "m" + str(formal_date[1]) + "d" + str(formal_date[0])
-                        return formal_date, index-1 , index+1
+                        # if the year is not mentioned, add the current year
+                        formal_date = [int(token_list[index - 1]), int(token_list[index + 1]), date.today().year]
+                        if len(str(formal_date[0])) != 2:
+                            formal_date[0] = str(formal_date[0]).zfill(2)
+                        if len(str(formal_date[1])) != 2:
+                            formal_date[1] = str(formal_date[1]).zfill(2)
+                        if len(str(formal_date[2])) != 4:
+                            formal_date[2] = int(formal_date[2]) + 1300
+                        formal_date = str(formal_date[2]) + "/" + str(formal_date[1]) + "/" + str(formal_date[0])
+                        formal_date = self.jalali_to_gregorian(formal_date)
+                        return formal_date, index - 1, index + 1
 
             if element in self.month_dict or element == "سال":
                 if index + 1 < len(token_list) and index - 1 > -2:
                     try:
-                        formal_date = [int(token_list[index - 1]), int(self.month_dict[token_list[index]]), int(token_list[index + 1])]
-                        formal_date = "y" + str(formal_date[2]) + "m" + str(formal_date[1]) + "d" + str(formal_date[0])
+                        # support name of month (example: شهریور)
+                        formal_date = [int(token_list[index - 1]), int(self.month_dict[token_list[index]]),
+                                       int(token_list[index + 1])]
+                        if len(str(formal_date[0])) != 2:
+                            formal_date[0] = str(formal_date[0]).zfill(2)
+                        if len(str(formal_date[1])) != 2:
+                            formal_date[1] = str(formal_date[1]).zfill(2)
+                        if len(str(formal_date[2])) != 4:
+                            formal_date[2] = int(formal_date[2]) + 1300
+                        formal_date = str(formal_date[2]) + "/" + str(formal_date[1]) + "/" + str(formal_date[0])
+                        formal_date = self.jalali_to_gregorian(formal_date)
                         if token_list[index - 1] and token_list[index + 1]:
-                            return formal_date, index-1, index+1
+                            return formal_date, index - 1, index + 1
                     except:
                         try:
-                            formal_date = [int(token_list[index - 1]), int(self.month_dict[token_list[index]]), 0]
-                            formal_date = "y" + str(formal_date[2]) + "m" + str(formal_date[1]) + "d" + str(formal_date[0])
-                            return formal_date, index-1, index
+                            formal_date = [int(token_list[index - 1]), int(self.month_dict[token_list[index]]),
+                                           date.today().year]
+
+                            if len(str(formal_date[0])) != 2:
+                                formal_date[0] = str(formal_date[0]).zfill(2)
+                            if len(str(formal_date[1])) != 2:
+                                formal_date[1] = str(formal_date[1]).zfill(2)
+                            if len(str(formal_date[2])) != 4:
+                                formal_date[2] = int(formal_date[2]) + 1300
+                            formal_date = str(formal_date[2]) + "/" + str(formal_date[1]) + "/" + str(formal_date[0])
+                            formal_date = self.jalali_to_gregorian(formal_date)
+                            return formal_date, index - 1, index
                         except:
                             try:
+                                # in case of only date is present, month and year match to the current month and year
                                 if token_list[index] == "سال":
-                                    formal_date = [int(token_list[index + 1]),0, 0]
-                                    formal_date = "y" + str(formal_date[2]) + "m" + str(formal_date[1]) + "d" + str(formal_date[0])
-                                    return formal_date, index+1, index+1
+                                    formal_date = [int(token_list[index + 1]), date.today().month, date.today().year]
+                                    if len(str(formal_date[0])) != 2:
+                                        formal_date[0] = str(formal_date[0]).zfill(2)
+                                    if len(str(formal_date[1])) != 2:
+                                        formal_date[1] = str(formal_date[1]).zfill(2)
+                                    if len(str(formal_date[2])) != 4:
+                                        formal_date[2] = int(formal_date[2]) + 1300
+                                    formal_date = str(formal_date[2]) + "/" + str(formal_date[1]) + "/" + str(
+                                        formal_date[0])
+                                    formal_date = self.jalali_to_gregorian(formal_date)
+                                    return formal_date, index + 1, index + 1
                                 else:
                                     print("error")
                             except:
@@ -411,7 +500,7 @@ class DateNormalizer():
         if len(tmp_section_list) > 0:
             value += self.list2num(tmp_section_list)
             tmp_section_list[:] = []
-        if (value-int(value) == 0):
+        if (value - int(value) == 0):
             return int(value)
         else:
             return value
@@ -421,19 +510,19 @@ class DateNormalizer():
 
     def find_number_location(self, token_list):
         start_index = 0
-        number_section =[]
-        for i , el in enumerate(token_list):
+        number_section = []
+        for i, el in enumerate(token_list):
             if self.is_number(el) or (el.replace('.', '', 1).isdigit()):
                 start_index = i
                 number_section.append(start_index)
                 break
 
-        i = start_index+1
-        while(i < len(token_list)):
-            if token_list[i] == "و" and (i+1)<len(token_list):
-                if self.is_number(token_list[i+1]) or (token_list[i+1].replace('.', '', 1).isdigit()):
+        i = start_index + 1
+        while (i < len(token_list)):
+            if token_list[i] == "و" and (i + 1) < len(token_list):
+                if self.is_number(token_list[i + 1]) or (token_list[i + 1].replace('.', '', 1).isdigit()):
                     number_section.append(i)
-                    number_section.append(i+1)
+                    number_section.append(i + 1)
                     i += 2
                 else:
                     break
@@ -473,13 +562,12 @@ class PinglishNormalizer():
         self.fa_dict_filename = self.file_dir + "resource/tokenizer/faDict"
         self.fa_dict = self.data_helper.load_var(self.fa_dict_filename)
 
-
     def pingilish2persian(self, pinglish_words_list):
 
         for i, word in enumerate(pinglish_words_list):
             if word in self.en_dict:
-                pinglish_words_list[i] = self.en_dict[word]#.decode("utf-8")
-                #inp = inp.replace(word, enDict[word], 1)
+                pinglish_words_list[i] = self.en_dict[word]  # .decode("utf-8")
+                # inp = inp.replace(word, enDict[word], 1)
             else:
                 ch = self.characterize(word)
                 pr = self.map_char(ch)
@@ -488,8 +576,8 @@ class PinglishNormalizer():
                     am = self.escalation(wd)
                     asd = ''.join(am)
                     if asd in self.fa_dict:
-                        pinglish_words_list[i] = asd#.decode("utf-8")
-                        #inp = inp.replace(word, asd, 1)
+                        pinglish_words_list[i] = asd  # .decode("utf-8")
+                        # inp = inp.replace(word, asd, 1)
         inp = " ".join(x for x in pinglish_words_list)
         return inp
 
@@ -501,9 +589,9 @@ class PinglishNormalizer():
             sw_out = self.switcher(char)
             if (sw_out == None):
                 esp_out = None
-                if(i < len(word) - 1):
+                if (i < len(word) - 1):
                     esp_out = self.esp_check(word[i], word[i + 1])
-                if(esp_out == None):
+                if (esp_out == None):
                     list_of_char.append(word[i])
                 else:
                     list_of_char.append(esp_out)
